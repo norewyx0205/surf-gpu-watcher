@@ -1,6 +1,7 @@
 import contextlib
 import errno
 import io
+import json
 import os
 from pathlib import Path
 import smtplib
@@ -134,6 +135,48 @@ class ConnectionTests(unittest.TestCase):
         smtp.starttls.assert_called_once()
         smtp.login.assert_not_called()
         smtp.send_message.assert_not_called()
+
+    def test_legacy_browser_endpoint_is_normalized_when_loading_config(self):
+        path = self.cfg["_dir"] / "config.json"
+        path.write_text(json.dumps({"endpoint": w.LEGACY_ENDPOINT}))
+        self.assertEqual(w.load_config(path)["endpoint"], w.ENDPOINT)
+        # Loading does not overwrite the user's file or credential configuration.
+        self.assertEqual(json.loads(path.read_text())["endpoint"], w.LEGACY_ENDPOINT)
+
+    def test_403_reports_endpoint_permission_instead_of_bad_token(self):
+        opener = Mock()
+        opener.open.side_effect = urllib.error.HTTPError(w.ENDPOINT, 403, "Forbidden", {}, io.BytesIO(b""))
+        with patch.dict(os.environ, {"RESEARCH_CLOUD_TOKEN": "synthetic-token"}), \
+                patch.object(w.urllib.request, "build_opener", return_value=opener), self.assertRaises(w.WatchError) as caught:
+            w.fetch_status(self.cfg)
+        self.assertIn("endpoint", str(caught.exception))
+        self.assertNotIn("expired", str(caught.exception))
+
+    def test_legacy_lease_url_migration_preserves_deadline_and_confirmation(self):
+        auto = a.settings(self.cfg)
+        store = a.LeaseStore(self.cfg, auto)
+        state = store.transaction(create=True)
+        state["identity"]["endpoint"] = w.LEGACY_ENDPOINT
+        state.update(phase="awaiting_confirmation", deadline=12345678999,
+                     confirmation_token="existing-token", resume_action_id="existing-resume")
+        w.private_write(store.path, json.dumps(state))
+        migrated = store.transaction()
+        self.assertEqual(migrated["identity"]["endpoint"], w.ENDPOINT)
+        self.assertEqual(migrated["deadline"], 12345678999)
+        self.assertEqual(migrated["confirmation_token"], "existing-token")
+        store.confirm("existing-token", clock=lambda: 1000)
+        self.assertEqual(store.transaction()["phase"], "confirmed")
+
+    def test_legacy_notification_url_does_not_resend_after_upgrade(self):
+        self.cfg["smtp"]["username"] = ""
+        path = self.cfg["_dir"] / self.cfg["state_file"]
+        w.private_write(path, json.dumps({"endpoint": w.LEGACY_ENDPOINT, "status_key": "a10",
+                                         "min_free": 1, "to": self.cfg["smtp"]["to"],
+                                         "notified_at": "2026-10-13T10:00:00+00:00"}))
+        fetch, send = Mock(), Mock()
+        w.watch(self.cfg, fetch=fetch, send=send, sleep=Mock())
+        fetch.assert_not_called()
+        send.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -29,6 +29,8 @@ The wizard asks for your recipient and workspace ID. Credential entry is hidden.
 
 Alternatively, copy `config.example.json` to `config.json` and fill it in. Environment variables `RESEARCH_CLOUD_TOKEN` and `SMTP_PASSWORD` override the credential files. Relative paths resolve against the configuration directory. SURF tokens are sent in `authorization` without adding `Bearer`, as SURF documents.
 
+Catalog polling uses `https://gw.live.surfresearchcloud.nl/v1/application-market/health/status/`. The unversioned browser route can return 403 for a valid personal API token even while workspace queries work. Existing configurations using that exact old route are normalized to `/v1/` when loaded, so there is no need to rerun `init` or replace credentials. Existing lease deadlines and notification records are preserved through this URL migration.
+
 For a version 1 installation, keep your SMTP settings and credentials, add the sample's `auto` section, and supply a workspace UUID. Use a distinct `auto.state_file`; do not reuse the notification-only state file.
 
 Verify before arming automatic mode:
@@ -168,7 +170,7 @@ systemctl --user stop surf-a10-watch.service
 
 Verified on **13 October 2026**:
 
-- The current [SURF portal](https://portal.live.surfresearchcloud.nl/help) uses `https://gw.live.surfresearchcloud.nl/application-market/health/status/` for Catalog information. Anonymous calls return 401. This portal endpoint is absent from public Catalog Swagger and may change.
+- The current [SURF portal](https://portal.live.surfresearchcloud.nl/help) uses the unversioned Catalog health route in its browser UI. A user-authenticated test confirmed that the `/v1/application-market/health/status/` equivalent accepts a personal API token; the unversioned route returned 403 for the same account. The versioned response includes `a10` and `rtx2080` integer indicators. This health endpoint is absent from public Catalog Swagger and may change.
 - [Official Workspace Swagger](https://gw.live.surfresearchcloud.nl/v1/workspace/swagger/docs/) documents `GET /v1/workspace/workspaces/{id}/` and `POST /v1/workspace/workspaces/{id}/actions/{action_type}/`, with `resume`/`pause`, empty JSON objects, and workspace responses exposing status/action history.
 - [Workspace actions](https://servicedesk.surf.nl/wiki/spaces/WIKI/pages/19825316/Workspace%2Bactions) documents resuming/running and pausing/paused transitions.
 - [Workspace admin access](https://servicedesk.surf.nl/wiki/spaces/WIKI/pages/37388582/Sharing%2Bcontrol%2Bworkspace%2Badmin) describes owner and `src_ws_admin` action permissions.
@@ -180,4 +182,4 @@ Run synthetic tests:
 python3 -m unittest discover -s tests -v
 ```
 
-Tests cover parsing, exact target selection, GET versus POST confirmation, timeout races, original restart deadlines, duplicate prevention, uncertain action outcomes, permission recovery, external intervention, failed Pause, and SMTP latency/failure. They do not access real SURF workspaces or send real email. This delivery has not authenticated to the target VM, executed a real Resume/Pause, sent email, or deployed a remotely reachable confirmation service. Complete the actual host's read-only and delivery checks before arming it.
+Tests cover parsing, exact target selection, GET versus POST confirmation, timeout races, original restart deadlines, duplicate prevention, uncertain action outcomes, permission recovery, external intervention, failed Pause, SMTP latency/failure, and transport diagnostics. They do not access real SURF workspaces or send real email. The user's local checks confirmed authenticated Catalog/workspace reads and SMTP acceptance after repairing Python's CA certificates. Actual Resume/Pause operations remain unverified by this delivery. Complete the actual host's read-only and inbox delivery checks before arming it.

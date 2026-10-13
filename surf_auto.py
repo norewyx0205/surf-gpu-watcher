@@ -179,8 +179,15 @@ class LeaseStore:
 
     def transaction(self, change=None, *, create=False):
         with w.state_lock(self.path, blocking=True):
+            migrated = False
             if self.path.exists():
                 state = w.read_json(self.path)
+                if isinstance(state.get("identity"), dict):
+                    saved_endpoint = state["identity"].get("endpoint")
+                    canonical = w.canonical_catalog_endpoint(saved_endpoint)
+                    if canonical != saved_endpoint:
+                        state["identity"]["endpoint"] = canonical
+                        migrated = True
                 if state.get("version") != 2 or state.get("identity") != self.identity:
                     raise w.WatchError("This auto state file belongs to another configuration. Use a new auto.state_file.")
                 if state.get("phase") not in {"waiting", "resume_pending", "resuming", "awaiting_confirmation",
@@ -193,7 +200,7 @@ class LeaseStore:
                 raise w.WatchError("No automatic lease exists yet.")
             if change:
                 change(state)
-            if change or create:
+            if change or create or migrated:
                 w.private_write(self.path, json.dumps(state, indent=2) + "\n")
             return copy.deepcopy(state)
 

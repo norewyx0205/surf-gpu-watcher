@@ -30,7 +30,8 @@ from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid, parsedate_to_datetime
 
 LOG = logging.getLogger("surf-watch")
-ENDPOINT = "https://gw.live.surfresearchcloud.nl/application-market/health/status/"
+LEGACY_ENDPOINT = "https://gw.live.surfresearchcloud.nl/application-market/health/status/"
+ENDPOINT = "https://gw.live.surfresearchcloud.nl/v1/application-market/health/status/"
 PORTAL = "https://portal.live.surfresearchcloud.nl/help"
 DEFAULT_TO = ""
 
@@ -88,6 +89,11 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def canonical_catalog_endpoint(endpoint):
+    """The browser route rejects personal tokens; use its versioned API equivalent."""
+    return ENDPOINT if endpoint == LEGACY_ENDPOINT else endpoint
+
+
 def private_write(path: Path, text: str) -> None:
     """Atomically replace a file; create it with user-only permissions on POSIX."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,6 +123,7 @@ def load_config(path: Path) -> dict:
     cfg = read_json(path)
     cfg["_dir"] = path.resolve().parent
     cfg.setdefault("endpoint", ENDPOINT)
+    cfg["endpoint"] = canonical_catalog_endpoint(cfg["endpoint"])
     cfg.setdefault("status_key", "a10")
     cfg.setdefault("min_free", 1)
     cfg.setdefault("interval_seconds", 60)
@@ -212,8 +219,10 @@ def fetch_status(cfg: dict) -> dict:
         status = e.code
         retry_after = retry_after_seconds(e.headers.get("Retry-After")) if e.headers else 0
         e.close()
-        if status in (401, 403):
-            raise WatchError(f"SURF HTTP {status}: invalid/expired token or insufficient permission. Check your API token.") from None
+        if status == 401:
+            raise WatchError("SURF HTTP 401: invalid or expired API token. Check your API token.") from None
+        if status == 403:
+            raise WatchError("SURF HTTP 403: the token is not permitted to access this Catalog endpoint. Check the API URL and endpoint permissions.") from None
         raise WatchError(f"SURF HTTP {status}.", retryable=status in (408, 429) or status >= 500,
                          retry_after=retry_after) from None
     except (urllib.error.URLError, OSError) as e:
@@ -421,11 +430,12 @@ def watch(cfg: dict, *, fetch=fetch_status, send=send_email, sleep=time.sleep) -
     with state_lock(path):
         if path.exists():
             state = read_json(path)
-            if (state.get("endpoint") != cfg["endpoint"]
+            if (canonical_catalog_endpoint(state.get("endpoint")) != cfg["endpoint"]
                     or state.get("status_key") != cfg["status_key"].casefold()
                     or state.get("min_free") != cfg["min_free"]
                     or state.get("to") != mail["to"]):
                 raise WatchError("This state file belongs to a different configuration. Use a new state_file.")
+            state["endpoint"] = cfg["endpoint"]
             if state.get("notified_at"):
                 LOG.info("This task already notified you (%s). Use a new state_file for another wait.",
                          state["notified_at"])

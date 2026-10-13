@@ -1,5 +1,5 @@
 {
-  "endpoint": "https://gw.live.surfresearchcloud.nl/application-market/health/status/",
+  "endpoint": "https://gw.live.surfresearchcloud.nl/v1/application-market/health/status/",
   "status_key": "a10",
   "min_free": 1,
   "interval_seconds": 60,
