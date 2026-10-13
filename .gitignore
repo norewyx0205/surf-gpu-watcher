@@ -1,0 +1,9 @@
+config.json
+surf-token.txt
+smtp-password.txt
+state*.json
+auto-state*.json
+config.*.local.json
+*.lock
+*.log
+__pycache__/

@@ -1,0 +1,18 @@
+[Unit]
+Description=SURF GPU watcher with automatic Resume and timed Pause
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# Replace YOUR_USER with the account running this user service.
+WorkingDirectory=/home/YOUR_USER/surf-a10-watch
+ExecStart=/usr/bin/python3 /home/YOUR_USER/surf-a10-watch/surf_watch.py --config /home/YOUR_USER/surf-a10-watch/config.json auto
+Restart=on-failure
+RestartSec=60
+RestartPreventExitStatus=78 130
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

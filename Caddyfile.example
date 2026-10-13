@@ -1,0 +1,6 @@
+# Replace this domain with an HTTPS domain pointing to the watcher server.
+# Configure the same origin as auto.confirmation.base_url.
+# Do not enable query-string access logging: URLs contain confirmation tokens.
+gpu-watch.example.org {
+    reverse_proxy 127.0.0.1:8765
+}

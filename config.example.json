@@ -1,0 +1,31 @@
+{
+  "endpoint": "https://gw.live.surfresearchcloud.nl/application-market/health/status/",
+  "status_key": "a10",
+  "min_free": 1,
+  "interval_seconds": 60,
+  "timeout_seconds": 20,
+  "token_file": "surf-token.txt",
+  "state_file": "state.json",
+  "smtp": {
+    "host": "YOUR_SMTP_HOST",
+    "port": 465,
+    "security": "ssl",
+    "username": "YOUR_SMTP_USERNAME",
+    "password_file": "smtp-password.txt",
+    "from": "YOUR_AUTHORIZED_SENDER@example.com",
+    "to": "YOUR_RECIPIENT@example.com"
+  },
+  "auto": {
+    "workspace_id": "REPLACE_WITH_YOUR_WORKSPACE_UUID",
+    "state_file": "auto-state.json",
+    "confirmation_seconds": 600,
+    "status_poll_seconds": 5,
+    "resume_timeout_seconds": 900,
+    "display_timezone": "Europe/Amsterdam",
+    "confirmation": {
+      "host": "127.0.0.1",
+      "port": 8765,
+      "base_url": "http://127.0.0.1:8765"
+    }
+  }
+}
