@@ -16,6 +16,7 @@ import math
 import os
 from pathlib import Path
 import random
+import shlex
 import smtplib
 import socket
 import ssl
@@ -25,6 +26,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid, parsedate_to_datetime
@@ -33,7 +35,6 @@ LOG = logging.getLogger("surf-watch")
 LEGACY_ENDPOINT = "https://gw.live.surfresearchcloud.nl/application-market/health/status/"
 ENDPOINT = "https://gw.live.surfresearchcloud.nl/v1/application-market/health/status/"
 PORTAL = "https://portal.live.surfresearchcloud.nl/help"
-DEFAULT_TO = ""
 
 
 class WatchError(Exception):
@@ -251,6 +252,19 @@ def availability(payload: dict, key: str, minimum: int = 1) -> tuple[bool, str, 
     raise WatchError(f"Field {actual!r} has type {type(value).__name__}; expected a boolean or nonnegative integer.")
 
 
+def email_address(value: str) -> str:
+    if (value.count("@") != 1 or not all(value.split("@"))
+            or any(c.isspace() or c in ",;<>" for c in value)):
+        raise WatchError("Enter one complete email address, without a display name or spaces.")
+    return value
+
+
+def smtp_host(value: str) -> str:
+    if not value or any(c.isspace() or c in "/@" for c in value):
+        raise WatchError("Enter a hostname such as smtp.gmail.com, without https:// or an email address.")
+    return value
+
+
 def validate_mail(cfg: dict, *, credentials: bool = True) -> dict:
     mail = cfg.get("smtp")
     if not isinstance(mail, dict):
@@ -261,11 +275,11 @@ def validate_mail(cfg: dict, *, credentials: bool = True) -> dict:
         if any(c in mail[key] for c in "\r\n"):
             raise WatchError(f"smtp.{key} must not contain newlines.")
     for key in ("from", "to"):
-        address = mail[key]
-        if address.count("@") != 1 or any(c.isspace() or c in ",;<>" for c in address):
-            raise WatchError(f"smtp.{key} must contain one email address.")
-    if any(c in mail["host"] for c in "/@ \t"):
-        raise WatchError("smtp.host must be a hostname or IP address, without a URL, user information or whitespace.")
+        try:
+            email_address(mail[key])
+        except WatchError:
+            raise WatchError(f"smtp.{key} must contain one complete email address.") from None
+    smtp_host(mail["host"])
     if mail.get("security") not in ("ssl", "starttls"):
         raise WatchError("smtp.security must be ssl (usually port 465) or starttls (usually port 587).")
     if type(mail.get("port")) is not int or not 1 <= mail["port"] <= 65535:
@@ -474,54 +488,159 @@ def watch(cfg: dict, *, fetch=fetch_status, send=send_email, sleep=time.sleep) -
             sleep(delay)
 
 
+def prompt_value(prompt, validate, *, default="", hidden=False):
+    """Retry invalid fields without echoing the entered value, including credentials."""
+    while True:
+        value = getpass.getpass(prompt) if hidden else input(prompt).strip()
+        try:
+            return validate(value if value else default)
+        except WatchError as error:
+            print(f"Please try again: {error}")
+
+
+def command_hint(command: str, path: Path) -> str:
+    args = ["python3", "surf_watch.py"]
+    if path != Path("config.json"):
+        args.extend(["--config", str(path)])
+    return shlex.join(args + [command])
+
+
 def initialize(path: Path) -> None:
     cfg = {
         "endpoint": ENDPOINT, "status_key": "a10", "min_free": 1,
         "interval_seconds": 60, "timeout_seconds": 20,
         "token_file": "surf-token.txt", "state_file": "state.json",
         "smtp": {"host": "", "port": 465, "security": "ssl", "username": "",
-                 "password_file": "smtp-password.txt", "from": "", "to": DEFAULT_TO},
+                 "password_file": "smtp-password.txt", "from": "", "to": ""},
     }
     paths = [path, path.parent / "surf-token.txt", path.parent / "smtp-password.txt"]
     if any(p.exists() for p in paths):
-        raise WatchError("Configuration or credential files already exist. init will not overwrite them; edit config.json.")
-    print("Create a SURF token under Profile > API tokens. Credential input is hidden.")
-    token = getpass.getpass("SURF personal API token: ").strip()
-    if not token or any(c in token for c in "\r\n"):
-        raise WatchError("The token must be nonempty and must not contain newlines.")
+        raise WatchError(f"Configuration or credential files already exist. Edit {path} to change settings; "
+                         f"do not rerun init. Diagnose connections with: {command_hint('doctor', path)}")
+    print("SURF GPU Watcher setup (English)\n")
+    print("Prepare your SURF personal API token, sender email credentials, recipient address, and workspace ID.")
+    print("The sender's provider determines SMTP settings. Gmail can send to a university Outlook address.")
+    print("Passwords and tokens are hidden: seeing no characters while typing or pasting is normal.")
+    print("Setup saves local files only; it does not connect, send email, or Resume/Pause a VM.\n")
+    if sys.platform == "darwin":
+        ca = ssl.get_default_verify_paths()
+        if not ca.cafile and not ca.capath:
+            installer = f"/Applications/Python {sys.version_info.major}.{sys.version_info.minor}/Install Certificates.command"
+            print("Mac certificate check: Python has no default CA file or directory.")
+            print(f"For python.org Python, run {shlex.quote(installer)} in another terminal before connection checks.\n")
+
+    def credential(value):
+        if not value or any(c in value for c in "\r\n"):
+            raise WatchError("A nonempty credential without newlines is required.")
+        return value
+
+    def token_value(value):
+        return credential(value.strip())
+
+    print("[1/9] SURF token: portal > Profile > API tokens. Paste the token itself, without 'Bearer'.")
+    print("For automatic mode, its account needs Resume/Pause permission for your selected workspace.")
+    token = prompt_value("SURF personal API token (hidden): ", token_value, hidden=True)
     mail = cfg["smtp"]
-    mail["host"] = input("SMTP host (provided by your email service): ").strip()
-    security = input("SMTP security [ssl/starttls, default ssl]: ").strip() or "ssl"
-    if security not in ("ssl", "starttls"):
-        raise WatchError("Enter ssl or starttls.")
+    print("\n[2/9] SMTP host: use the sending provider's hostname. For Gmail: smtp.gmail.com.")
+    mail["host"] = prompt_value("SMTP host: ", smtp_host)
+    gmail = mail["host"].casefold() == "smtp.gmail.com"
+    print("\n[3/9] SMTP security is a connection mode, not a password or a value you need to obtain.")
+    print("Use ssl with port 465, or starttls with port 587. Gmail supports both; press Enter for ssl.")
+
+    def security_value(value):
+        if value.lower() not in ("ssl", "starttls"):
+            raise WatchError("Enter ssl or starttls, or press Enter for ssl.")
+        return value.lower()
+
+    security = prompt_value("SMTP security [ssl/starttls; default ssl]: ", security_value, default="ssl")
     mail["security"] = security
     default_port = 465 if security == "ssl" else 587
-    try:
-        mail["port"] = int(input(f"SMTP port [{default_port}]: ").strip() or default_port)
-    except ValueError:
-        raise WatchError("SMTP port must be an integer.") from None
-    mail["username"] = input("SMTP username (blank for an authorized relay): ").strip()
-    password = getpass.getpass("SMTP password / app password: ") if mail["username"] else ""
-    mail["from"] = input("Sender address (authorized by the email service): ").strip()
-    mail["to"] = input(f"Recipient address: ").strip() or DEFAULT_TO
-    workspace_id = input("Workspace ID for automatic mode (blank for notification-only): ").strip()
+    print(f"\n[4/9] SMTP port: the usual port for {security} is {default_port}. Press Enter to use it.")
+
+    def port_value(value):
+        try:
+            port = int(value)
+        except ValueError:
+            raise WatchError("Enter a port number from 1 to 65535.") from None
+        if not 1 <= port <= 65535:
+            raise WatchError("Enter a port number from 1 to 65535.")
+        if gmail and port != default_port:
+            raise WatchError(f"For Gmail with {security}, use port {default_port}.")
+        return port
+
+    mail["port"] = prompt_value(f"SMTP port [{default_port}]: ", port_value, default=str(default_port))
+    print("\n[5/9] SMTP username: usually your full sender email address.")
+    if not gmail:
+        print("Leave blank only if your administrator provides a relay that allows sending without login.")
+    mail["username"] = prompt_value("SMTP username: ", email_address) if gmail else input("SMTP username: ").strip()
+    print("\n[6/9] SMTP password: use the password/app password required by the sending provider.")
+    if gmail:
+        print("For Gmail, enable Google 2-Step Verification, then create an App Password:")
+        print("https://myaccount.google.com/apppasswords")
+        print("Enter the 16-character App Password without grouping spaces, not your normal Google password.")
+
+    def password_value(value):
+        credential(value)
+        if gmail and (len(value) != 16 or any(c.isspace() for c in value)):
+            raise WatchError("Use the 16-character Gmail App Password without spaces.")
+        return value
+
+    password = prompt_value("SMTP password / app password (hidden): ", password_value, hidden=True) if mail["username"] else ""
+    if not mail["username"]:
+        print("Skipped: your relay is configured without a login.")
+    print("\n[7/9] Sender address: an address your sending provider allows you to send from.")
+    sender_default = mail["username"] if gmail else ""
+    mail["from"] = prompt_value(f"Sender address{' [' + sender_default + ']' if sender_default else ''}: ",
+                                email_address, default=sender_default)
+    print("\n[8/9] Recipient address: where you want alerts. It may use a different provider from the sender.")
+    mail["to"] = prompt_value("Recipient address (e.g. your university Outlook email): ", email_address)
+    print("\n[9/9] Workspace ID: portal > your workspace details > Id. Copy the UUID, not the hostname or URL.")
+    print("Enter an ID for automatic Resume/Pause, or leave blank for email notifications only.")
+
+    def workspace_value(value):
+        if not value:
+            return ""
+        try:
+            parsed = str(uuid.UUID(value))
+            if parsed != value.lower():
+                raise ValueError
+        except ValueError:
+            raise WatchError("Enter the workspace UUID in xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx format, or leave blank.") from None
+        return parsed
+
+    workspace_id = prompt_value("Workspace ID [blank for notification-only]: ", workspace_value)
     if workspace_id:
         cfg["auto"] = {"workspace_id": workspace_id, "state_file": "auto-state.json",
                        "confirmation_seconds": 600, "status_poll_seconds": 5,
                        "resume_timeout_seconds": 900, "display_timezone": "Europe/Amsterdam",
                        "confirmation": {"host": "127.0.0.1", "port": 8765,
                                         "base_url": "http://127.0.0.1:8765"}}
+    # Validate every answer before writing credentials or configuration.
+    validate_mail(cfg, credentials=False)
     private_write(paths[1], token + "\n")
     if mail["username"]:
         private_write(paths[2], password + "\n")
     private_write(path, json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
-    validate_mail(load_config(path))
-    print(f"Saved configuration: {path.resolve()}. Credential files use owner-only permissions on POSIX.")
-    print("Next: run check, then test-email. Use watch for notification-only mode or auto for automatic VM management.")
+    print(f"\nSaved configuration: {path.resolve()}. Credential files use owner-only permissions on POSIX.")
+    print(f"Email: {mail['from']} -> {mail['to']} via {mail['host']} ({security}, port {mail['port']}).")
+    print("Next, run these checks with the same Python installation:")
+    for command in (["check", "workspace-check", "test-email"] if workspace_id else ["check", "test-email"]):
+        print("  " + command_hint(command, path))
+    print("A10 = 0 is a successful capacity check: it means wait, not a connection error.")
+    print("Check the test email in your inbox/spam before starting the watcher.")
+    if workspace_id:
+        print("Verify the workspace ID/flavour and that it is paused with Resume allowed.")
+        print("Confirmation links default to this computer only. For a remote host, see QUICKSTART.md before starting.")
+        print("When the VM reaches running, open the emailed link and click Confirm use within 10 minutes.")
+        print("Opening email or logging in to Jupyter/SSH does not confirm use.")
+    print("Start: " + command_hint("auto" if workspace_id else "watch", path))
+    print("Keep this computer awake and the watcher process running. For connection failures: " + command_hint("doctor", path))
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     epilog="First run: init, then check, workspace-check (automatic mode), and test-email. "
+                                            "Connection trouble: doctor. Step-by-step guide: QUICKSTART.md.")
     parser.add_argument("--config", type=Path, default=Path("config.json"), help="Path to the configuration JSON file")
     parser.add_argument("command", choices=("init", "check", "test-email", "watch",
                                            "auto", "workspace-check", "confirm", "auto-status", "doctor"))
@@ -541,9 +660,14 @@ def main(argv=None) -> int:
                              ensure_ascii=False, indent=2))
             ready, key, value = availability(payload, cfg["status_key"], cfg["min_free"])
             print(f"{key} = {json.dumps(value)}; {'available' if ready else 'unavailable'}")
+            print("Catalog connection and availability parsing succeeded.")
+            if not ready:
+                print(f"Capacity is below min_free={cfg['min_free']}; this is normal waiting, not an error.")
+            print("This was one read-only query. It did not start polling or request Resume/Pause.")
+            print("After verification, start: " + command_hint("auto" if cfg.get("auto") else "watch", args.config))
         elif args.command == "test-email":
             send_email(cfg, cfg["status_key"], False, test=True)
-            LOG.info("SMTP accepted the test email. Check your inbox.")
+            LOG.info("SMTP accepted the test email. Confirm receipt in your inbox or spam folder; acceptance does not guarantee delivery.")
         elif args.command == "watch":
             watch(cfg)
         else:
@@ -559,6 +683,9 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         LOG.info("Watcher stopped.")
         return 130
+    except EOFError:
+        LOG.error("Setup input ended before completion. No configuration or credentials were saved. Run init again in an interactive terminal.")
+        return 78
 
 
 if __name__ == "__main__":

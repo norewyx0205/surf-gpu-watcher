@@ -614,6 +614,13 @@ def run(cfg, auto):
             w.LOG.info("Saved run is %s. Use a new auto.state_file to arm another run.", state["phase"])
             return
         with confirmation_server(store, auto):
+            w.LOG.info("Automatic watcher started for workspace %s; saved phase: %s.", auto["workspace_id"], state["phase"])
+            w.LOG.info("Waiting capacity polls: every %s seconds. Confirmation window: %s seconds after observed running.",
+                       cfg["interval_seconds"], auto["confirmation_seconds"])
+            w.LOG.info("Confirmation: open the emailed link, then click Confirm use. SSH/Jupyter login does not confirm use.")
+            if urllib.parse.urlsplit(auto["confirmation"]["base_url"]).hostname in ("127.0.0.1", "localhost"):
+                w.LOG.info("Confirmation links require a browser on this computer, or an SSH tunnel to it; see QUICKSTART.md.")
+            w.LOG.info("Keep this computer awake and this process running until confirmed or paused. Stopping it stops the Pause guard.")
             controller = Controller(cfg, auto, store)
             mailer = MailWorker(cfg, auto, store)
             try:
@@ -656,6 +663,22 @@ def dispatch(cfg, command):
                           "allowed_actions": workspace["allowed_actions"]}, indent=2))
         print("Read-only check: no Resume or Pause was requested.")
         WorkspaceAPI(cfg, auto).validate(workspace)
+        status = workspace["status"]
+        actions = workspace["allowed_actions"]
+        if status == "paused":
+            if "resume" in actions:
+                print("The workspace is paused and Resume is allowed. Verify its ID/flavour and test email delivery before starting auto.")
+            else:
+                print("Resume is not currently allowed. Check workspace permissions/state in SURF before starting auto.")
+                print("Reading the workspace does not prove Resume/Pause permission; ask its owner or workspace admin if needed.")
+        elif status in ("resuming", "pausing"):
+            print(f"The workspace is {status}. An empty allowed_actions list can be normal during a transition.")
+            print("Wait for the transition to finish, then rerun workspace-check. Automatic acquisition starts from paused.")
+        elif status == "running":
+            print("The workspace is already running. A new automatic acquisition cannot start until it is paused.")
+            print("If a watcher already resumed it, confirm via its email button or the confirm command before its deadline.")
+        else:
+            print("Check this workspace's status and recent actions in SURF before starting automatic mode.")
         return
     if command == "auto":
         run(cfg, auto)

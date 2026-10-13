@@ -25,7 +25,11 @@ For a new installation:
 python3 surf_watch.py init
 ```
 
-The wizard asks for your recipient and workspace ID. Credential entry is hidden. It creates `config.json`, `surf-token.txt` and, when required, `smtp-password.txt`. Linux/macOS files use owner-only permissions. Restrict directory access using Windows file permissions on Windows; use `python` instead of `python3` there.
+Follow the [step-by-step quick start](QUICKSTART.md) for every wizard field, a Gmail-to-Outlook example, and common troubleshooting results.
+
+The English wizard explains all nine fields, checks answers before saving, and lets you retry invalid input. Credential entry is hidden; no characters appearing while you type or paste is normal. Setup does not connect to SURF, send email, or operate a VM. It creates `config.json`, `surf-token.txt` and, when required, `smtp-password.txt`. Linux/macOS files use owner-only permissions. Restrict directory access using Windows file permissions on Windows; use `python` instead of `python3` there.
+
+For a Gmail sender, use `smtp.gmail.com`, `ssl`/465 or `starttls`/587, your full Gmail address as username, and a [Google App Password](https://myaccount.google.com/apppasswords). Enable 2-Step Verification first; use the 16-character app password without grouping spaces, rather than your normal Google password. Some managed accounts restrict app passwords; see [Google's requirements](https://support.google.com/accounts/answer/185833). Your recipient can be a university Outlook address; its provider does not determine the sending settings.
 
 Alternatively, copy `config.example.json` to `config.json` and fill it in. Environment variables `RESEARCH_CLOUD_TOKEN` and `SMTP_PASSWORD` override the credential files. Relative paths resolve against the configuration directory. SURF tokens are sent in `authorization` without adding `Bearer`, as SURF documents.
 
@@ -41,8 +45,8 @@ python3 surf_watch.py workspace-check
 python3 surf_watch.py test-email
 ```
 
-- `check` only reads Catalog information. Compare the exact field against Help > Catalog information. It accepts booleans or nonnegative integers and refuses strings such as `"false"`, missing fields, and unexpected structures.
-- `workspace-check` only reads the VM. Verify the ID, hostname, flavour, status and allowed actions. The VM should be paused and `resume` should be allowed. `pause` normally appears when running; its absence from a paused VM's actions does not by itself prove a permission problem.
+- `check` only reads Catalog information once. `a10 = 0; unavailable` is a successful query reporting no current capacity, not an error. It does not start polling. Compare the exact field against Help > Catalog information. It accepts booleans or nonnegative integers and refuses strings such as `"false"`, missing fields, and unexpected structures.
+- `workspace-check` only reads the VM. Verify the ID, hostname, flavour, status and allowed actions. The VM should be paused and `resume` should be allowed. An empty `allowed_actions` list while `resuming` or `pausing` can be normal; wait and check again. `pause` normally appears when running; its absence from a paused VM's actions does not by itself prove a permission problem.
 - `test-email` sends a clearly labelled test. Confirm inbox receipt, including spam. SMTP acceptance does not guarantee delivery.
 
 Then start:
@@ -129,7 +133,7 @@ The generic sample and shareable archive contain no personal recipient or VM ID.
 
 For **A10 - 2 GPU**, a boolean A10 indicator may only mean some capacity exists. Keep `min_free=1` as that trigger; a value of 2 makes the tool refuse a boolean it cannot interpret as a GPU count. The selected VM's actual flavour determines the allocation requested. A rejected Resume or failed action returning to paused is followed by a fresh availability check. A one-GPU opportunity cannot guarantee a two-GPU allocation, and another user can still win the race.
 
-Only use a numeric quantity threshold after verifying that SURF's integer field represents free GPU count. The authenticated help response has not been verified in this delivery.
+An authenticated Catalog response has been verified to contain integer A10/RTX2080 indicators. Only use a numeric quantity threshold after verifying with SURF that the value represents the free GPU count relevant to your flavour; the data type alone does not establish that meaning.
 
 ## Persistence and limitations
 
@@ -182,4 +186,4 @@ Run synthetic tests:
 python3 -m unittest discover -s tests -v
 ```
 
-Tests cover parsing, exact target selection, GET versus POST confirmation, timeout races, original restart deadlines, duplicate prevention, uncertain action outcomes, permission recovery, external intervention, failed Pause, SMTP latency/failure, and transport diagnostics. They do not access real SURF workspaces or send real email. The user's local checks confirmed authenticated Catalog/workspace reads and SMTP acceptance after repairing Python's CA certificates. Actual Resume/Pause operations remain unverified by this delivery. Complete the actual host's read-only and inbox delivery checks before arming it.
+Tests cover wizard validation and cancellation, parsing, exact target selection, GET versus POST confirmation, timeout races, original restart deadlines, duplicate prevention, uncertain action outcomes, permission recovery, external intervention, failed Pause, SMTP latency/failure, and transport diagnostics. They do not access real SURF workspaces or send real email. The user's local checks confirmed authenticated Catalog/workspace reads and SMTP acceptance after repairing Python's CA certificates. Actual Resume/Pause operations remain unverified by this delivery. Complete the actual host's read-only and inbox delivery checks before arming it.
