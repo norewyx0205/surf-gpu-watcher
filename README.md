@@ -64,6 +64,22 @@ python3 surf_watch.py confirm
 
 To arm another cycle after the process finishes, change `auto.state_file`, for example to `auto-state-next.json`. Do not delete active state or lock files. A finished run does not silently rearm after restart.
 
+## Troubleshoot connection failures on macOS
+
+If Catalog, workspace and SMTP checks all fail immediately, first run:
+
+```bash
+python3 surf_watch.py doctor
+```
+
+This diagnostic reads no token/password files, sends no credentials or email, and makes no VM actions. It reports the Python installation, trusted certificate paths, whether an HTTPS proxy is detected, and separate SURF HTTPS / SMTP TLS connection results. An unauthenticated SURF HTTP 401 means the HTTPS connection worked; it does not verify your token. SMTP is probed without logging in or sending a message. Proxy addresses and credentials are hidden.
+
+`CERTIFICATE_VERIFY_FAILED` usually needs repair of the Python installation's trusted certificates. For python.org Python on macOS, run **Install Certificates.command** in `/Applications/Python X.Y/` for the interpreter version in the diagnostic. This is a documented part of [installing Python on macOS](https://docs.python.org/3/using/mac.html). `cafile=None` and `capath=None` are a strong clue that default certificate locations are unavailable. Install a supported Python version (3.10+) if your current interpreter is older, and complete its matching certificate-installation step. Existing watcher configuration and credential files can be retained.
+
+For DNS failures, check the SMTP hostname and local DNS/proxy/VPN settings. For connection refusal or timeout, check the configured port and network/firewall reachability. Python's `smtplib` uses a direct TCP connection and does not tunnel SMTP through HTTP/HTTPS proxy variables. For Gmail, use `smtp.gmail.com` with `ssl`/465 or `starttls`/587.
+
+After repairing transport problems, rerun `check`, `workspace-check`, and `test-email` to verify authentication and delivery. Certificate verification remains enabled; the diagnostic does not install certificates or alter proxy settings.
+
 ## Confirmation links
 
 The confirmation server binds to **127.0.0.1:8765**, starting before a new Resume. Each lease gets a new unguessable token. A link can only confirm that lease; it contains no SURF or SMTP credentials. GET never confirms use: only a button POST does. The page has no third-party assets, and token-bearing requests are excluded from application access logs.

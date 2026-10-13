@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import getpass
 import json
 import logging
@@ -16,6 +17,7 @@ import os
 from pathlib import Path
 import random
 import smtplib
+import socket
 import ssl
 import sys
 import tempfile
@@ -38,6 +40,48 @@ class WatchError(Exception):
         super().__init__(message)
         self.retryable = retryable
         self.retry_after = retry_after
+
+
+def connection_error(error: Exception, service: str) -> WatchError:
+    """Describe the transport failure without dumping URLs, proxy credentials or server replies."""
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    retryable = True
+    text_reason = reason.lower() if isinstance(reason, str) else ""
+    if isinstance(reason, ssl.SSLCertVerificationError) or "certificate_verify_failed" in text_reason:
+        detail = ("TLS certificate verification failed (CERTIFICATE_VERIFY_FAILED). "
+                  "Check Python's trusted CA certificates; run doctor for certificate paths. "
+                  "For python.org Python on macOS, run its Install Certificates.command.")
+        retryable = False
+    elif isinstance(reason, ssl.SSLError):
+        detail = "TLS handshake failed (SSLError). Check the server's TLS mode/port and trusted certificates."
+        retryable = False
+    elif isinstance(reason, socket.gaierror):
+        detail = "DNS lookup failed (gaierror). Check the hostname, DNS, and proxy/VPN settings."
+    elif isinstance(reason, TimeoutError):
+        detail = "Connection timed out (TimeoutError). Check reachability and firewall/proxy settings."
+    elif isinstance(reason, ConnectionRefusedError):
+        detail = "Connection refused (ConnectionRefusedError). Check the server/port and proxy settings."
+    elif isinstance(reason, ConnectionResetError):
+        detail = "Connection reset (ConnectionResetError). Check the network, VPN and firewall."
+    elif isinstance(reason, OSError) and reason.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH):
+        detail = "Network or host unreachable. Check the network, VPN and routing."
+    elif isinstance(reason, OSError) and reason.errno in (errno.EACCES, errno.EPERM):
+        detail = "Connection blocked by OS permissions or network policy. Check the local firewall/policy."
+        retryable = False
+    elif "tunnel connection failed: 407" in text_reason:
+        detail = "HTTPS proxy authentication failed (407). Check the configured proxy."
+        retryable = False
+    elif "tunnel connection failed" in text_reason:
+        detail = "HTTPS proxy tunnel failed. Check the configured proxy and its destination policy."
+    elif isinstance(reason, smtplib.SMTPNotSupportedError):
+        detail = "The SMTP server does not support the requested TLS/authentication mode. Check SMTP settings."
+        retryable = False
+    elif isinstance(reason, smtplib.SMTPServerDisconnected):
+        detail = "SMTP server disconnected. Check SMTP security/port and network reachability."
+    else:
+        error_type = type(reason).__name__ if isinstance(reason, BaseException) else type(error).__name__
+        detail = f"Connection failed ({error_type}). Run doctor to check TLS, DNS and proxy settings."
+    return WatchError(f"{service}: {detail}", retryable=retryable)
 
 
 def now() -> str:
@@ -172,8 +216,8 @@ def fetch_status(cfg: dict) -> dict:
             raise WatchError(f"SURF HTTP {status}: invalid/expired token or insufficient permission. Check your API token.") from None
         raise WatchError(f"SURF HTTP {status}.", retryable=status in (408, 429) or status >= 500,
                          retry_after=retry_after) from None
-    except (urllib.error.URLError, OSError):
-        raise WatchError("SURF connection failed or timed out.", retryable=True) from None
+    except (urllib.error.URLError, OSError) as e:
+        raise connection_error(e, "SURF connection") from None
     except (ValueError, UnicodeError):
         raise WatchError("SURF returned invalid JSON; refusing to interpret it.") from None
     if not isinstance(payload, dict):
@@ -198,7 +242,7 @@ def availability(payload: dict, key: str, minimum: int = 1) -> tuple[bool, str, 
     raise WatchError(f"Field {actual!r} has type {type(value).__name__}; expected a boolean or nonnegative integer.")
 
 
-def validate_mail(cfg: dict) -> dict:
+def validate_mail(cfg: dict, *, credentials: bool = True) -> dict:
     mail = cfg.get("smtp")
     if not isinstance(mail, dict):
         raise WatchError("Missing smtp configuration. Run init.")
@@ -211,13 +255,15 @@ def validate_mail(cfg: dict) -> dict:
         address = mail[key]
         if address.count("@") != 1 or any(c.isspace() or c in ",;<>" for c in address):
             raise WatchError(f"smtp.{key} must contain one email address.")
+    if any(c in mail["host"] for c in "/@ \t"):
+        raise WatchError("smtp.host must be a hostname or IP address, without a URL, user information or whitespace.")
     if mail.get("security") not in ("ssl", "starttls"):
         raise WatchError("smtp.security must be ssl (usually port 465) or starttls (usually port 587).")
     if type(mail.get("port")) is not int or not 1 <= mail["port"] <= 65535:
         raise WatchError("smtp.port must be a valid port number.")
     if not isinstance(mail.get("username", ""), str):
         raise WatchError("smtp.username must be a string.")
-    if mail.get("username"):
+    if mail.get("username") and credentials:
         filename = mail.get("password_file", "smtp-password.txt")
         if not isinstance(filename, str) or not filename:
             raise WatchError("smtp.password_file must be a nonempty file path.")
@@ -276,8 +322,69 @@ def deliver_message(cfg: dict, message: EmailMessage) -> None:
                          retryable=400 <= e.smtp_code < 500) from None
     except smtplib.SMTPRecipientsRefused:
         raise WatchError("SMTP rejected the recipient. Check smtp.to.") from None
-    except (smtplib.SMTPException, OSError):
-        raise WatchError("SMTP connection or sending failed; delivery was not confirmed.", retryable=True) from None
+    except (smtplib.SMTPException, OSError) as e:
+        raise connection_error(e, "SMTP connection or sending failed; delivery was not confirmed") from None
+
+
+def doctor(cfg: dict) -> bool:
+    """Probe connections without reading credentials, authenticating, emailing or changing a VM."""
+    paths = ssl.get_default_verify_paths()
+    proxies = urllib.request.getproxies()
+    print("Read-only connection diagnostics: no credential files are read, no mail is sent, and no VM action is requested.")
+    print("Python:", sys.version.split()[0])
+    print("Executable:", sys.executable)
+    print("Platform:", sys.platform)
+    print("OpenSSL:", ssl.OPENSSL_VERSION)
+    print("Default CA file:", paths.cafile or "(missing)")
+    print("Default CA directory:", paths.capath or "(missing)")
+    for name in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
+        print(name + ":", "set" if os.environ.get(name) else "not set")
+    print("HTTPS proxy detected:", "yes (address and credentials hidden)" if proxies.get("https") else "no")
+    print("SMTP uses a direct TCP connection; HTTP/HTTPS proxy settings do not proxy smtplib.")
+    if sys.platform == "darwin":
+        installer = Path(f"/Applications/Python {sys.version_info.major}.{sys.version_info.minor}/Install Certificates.command")
+        if installer.exists():
+            print("python.org certificate installer:", installer)
+    passed = True
+    try:
+        context = ssl.create_default_context()
+        print("Trusted CA certificates:", context.cert_store_stats().get("x509_ca", 0))
+    except (OSError, ValueError) as e:
+        print("TLS context: FAIL -", connection_error(e, "TLS configuration"))
+        return False
+    # An unauthenticated HTTP response (usually 401) proves DNS/TCP/TLS worked.
+    request = urllib.request.Request(cfg["endpoint"], method="GET", headers={"User-Agent": "surf-gpu-watch/doctor"})
+    opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=context))
+    try:
+        with opener.open(request, timeout=cfg["timeout_seconds"]) as response:
+            print(f"SURF HTTPS: OK - HTTP {response.status}; authentication was not tested.")
+    except urllib.error.HTTPError as e:
+        print(f"SURF HTTPS: OK - HTTP {e.code}; an HTTP response was received without sending a token.")
+        e.close()
+    except (urllib.error.URLError, OSError) as e:
+        print("SURF HTTPS: FAIL -", connection_error(e, "SURF connection"))
+        passed = False
+    try:
+        mail = validate_mail(cfg, credentials=False)
+        print(f"SMTP target: {mail['host']}:{mail['port']} ({mail['security']})")
+        if mail["security"] == "ssl":
+            smtp = smtplib.SMTP_SSL(mail["host"], mail["port"], timeout=cfg["timeout_seconds"], context=context)
+        else:
+            smtp = smtplib.SMTP(mail["host"], mail["port"], timeout=cfg["timeout_seconds"])
+        with smtp:
+            smtp.ehlo()
+            if mail["security"] == "starttls":
+                smtp.starttls(context=context)
+                smtp.ehlo()
+        print("SMTP TCP/TLS: OK - login and email delivery were not tested.")
+    except WatchError as e:
+        print("SMTP configuration: FAIL -", e)
+        passed = False
+    except (smtplib.SMTPException, OSError) as e:
+        print("SMTP TCP/TLS: FAIL -", connection_error(e, "SMTP connection"))
+        passed = False
+    print("After fixing connection failures, rerun check, workspace-check, and test-email.")
+    return passed
 
 
 @contextlib.contextmanager
@@ -407,7 +514,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("config.json"), help="Path to the configuration JSON file")
     parser.add_argument("command", choices=("init", "check", "test-email", "watch",
-                                           "auto", "workspace-check", "confirm", "auto-status"))
+                                           "auto", "workspace-check", "confirm", "auto-status", "doctor"))
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
@@ -415,6 +522,8 @@ def main(argv=None) -> int:
             initialize(args.config)
             return 0
         cfg = load_config(args.config)
+        if args.command == "doctor":
+            return 0 if doctor(cfg) else 75
         if args.command == "check":
             payload = fetch_status(cfg)
             print("Catalog status fields (booleans/integers only; no email is sent):")

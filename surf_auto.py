@@ -126,9 +126,9 @@ class WorkspaceAPI:
             raise WorkspaceError(f"Workspace HTTP {code}. Check permissions and workspace status.", code=code,
                                  uncertain=bool(action) and (code == 408 or code >= 500),
                                  retryable=code in (408, 429) or code >= 500, retry_after=delay) from None
-        except (urllib.error.URLError, OSError):
-            raise WorkspaceError("Workspace request failed or timed out.", uncertain=bool(action),
-                                 retryable=True) from None
+        except (urllib.error.URLError, OSError) as e:
+            detail = w.connection_error(e, "Workspace connection")
+            raise WorkspaceError(str(detail), uncertain=bool(action), retryable=detail.retryable) from None
         except (ValueError, UnicodeError):
             raise WorkspaceError("Invalid workspace JSON response.", uncertain=bool(action)) from None
         try:
