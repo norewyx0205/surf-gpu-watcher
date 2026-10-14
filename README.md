@@ -1,6 +1,6 @@
 # SURF GPU Watcher
 
-An English-language Python tool for SURF Research Cloud. Requires **Python 3.10+**, with no third-party packages.
+A Python tool for SURF Research Cloud. Requires **Python 3.10+**, with no third-party packages.
 
 Automatic mode performs one acquisition cycle:
 
